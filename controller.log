@@ -1,0 +1,14 @@
+19:40:51,733 werkzeug WARNING  * Running on all addresses.
+   WARNING: This is a development server. Do not use it in a production deployment.
+19:40:51,733 werkzeug INFO  * Running on http://172.20.13.45:5000/ (Press CTRL+C to quit)
+19:41:00,172 werkzeug WARNING  * Running on all addresses.
+   WARNING: This is a development server. Do not use it in a production deployment.
+19:41:00,172 werkzeug INFO  * Running on http://172.20.13.45:6000/ (Press CTRL+C to quit)
+19:41:31,361 werkzeug INFO 127.0.0.1 - - [22/May/2022 19:41:31] "GET /health HTTP/1.1" 200 -
+19:41:31,614 werkzeug INFO 127.0.0.1 - - [22/May/2022 19:41:31] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+19:42:57,146 werkzeug WARNING  * Running on all addresses.
+   WARNING: This is a development server. Do not use it in a production deployment.
+19:42:57,146 werkzeug INFO  * Running on http://172.20.13.45:6000/ (Press CTRL+C to quit)
+19:43:34,141 werkzeug WARNING  * Running on all addresses.
+   WARNING: This is a development server. Do not use it in a production deployment.
+19:43:34,141 werkzeug INFO  * Running on http://172.20.13.45:6000/ (Press CTRL+C to quit)
