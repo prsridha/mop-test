@@ -1,8 +1,14 @@
 import os
 import json
+import random
 import logging
 import requests
+import itertools
 import numpy as np
+from time import sleep
+import tensorflow as tf
+from pathlib import Path
+from tensorflow import keras
 from flask import Flask, request
 
 app = Flask(__name__)
@@ -277,7 +283,6 @@ def get_runnable_model(worker_id, is_train=True):
     return -1
 
 
-
 def set_hyperparameters(configs):
     # config.load_config()
     # api_instance = client.CoreV1Api()
@@ -315,8 +320,78 @@ def update_model_worker_states(model_id, worker_id, is_model_running=False):
     logging.info("------------------------------------------------- ")
 
 
+def create_model(param_dict):
+    model = keras.models.Sequential()
+    model.add(keras.layers.Dense(1000, activation='relu',
+                                    input_shape=(7306,)))
+    model.add(keras.layers.Dense(500, activation='relu'))
+    model.add(keras.layers.Dense(2, activation='softmax'))
+
+    regularizer = keras.regularizers.l2(param_dict['lambda_value'])
+    for layer in model.layers:
+        for attr in ['kernel_regularizer', 'bias_regularizer']:
+            if hasattr(layer, attr):
+                setattr(layer, attr, regularizer)
+        for attr in ['kernel_initializer', 'bias_initializer']:
+            if hasattr(layer, attr):
+                layer_initializer = getattr(layer, attr)
+                if hasattr(layer_initializer, 'seed'):
+                    setattr(layer_initializer, 'seed', 2018)
+
+    optimizer = keras.optimizers.Adam(learning_rate=param_dict['learning_rate'])
+    model.compile(optimizer=optimizer,
+                loss=tf.losses.CategoricalCrossentropy(from_logits=True),
+                metrics=['accuracy'])
+    return model
 
 
+def init_and_save_models():
+    param_grid = get_param_grid()
+    param_keys = param_grid.keys()
+
+    for key in param_keys:
+        if key not in REQUIRED_HYPERPARAMS + OPTIONAL_HYPERPARAMS:
+            raise Exception(
+                '{} is not a hyperparameter the system recogises.'.format(key))
+
+    for hyperparam in REQUIRED_HYPERPARAMS:
+        if hyperparam not in param_keys:
+            raise Exception(
+                '{} is a required hyperparameter but was not specified in the'
+                ' configuration.'.format(hyperparam))
+
+    params_list = [param_grid[key] for key in param_keys]
+    param_combinations = list(itertools.product(*params_list))
+    configs = {}
+    for model_id, combination in enumerate(param_combinations):
+        param_dict = {key: val for key, val in zip(param_keys, combination)}
+        configs[model_id] = param_dict
+        model = create_model(param_dict)
+        path = os.path.join(CHECKPOINT_STORAGE_PATH, str(model_id))
+        Path(path).mkdir(parents=True, exist_ok=True)
+        model.save(path)
+
+    set_hyperparameter(configs)
+        
+
+@app.route("/train-one-epoch", methods=['GET'])
+def train_one_epoch():
+    init_epoch()
+    scheduler()
+    return "Success"
+
+@app.route("/init", methods=['GET'])
+def init():
+    init_and_save_models()
+    return "Success"
+
+@app.route("/train", methods=['GET'])
+def train():
+    num_epochs = get_num_epochs()
+    for epoch in range(num_epochs):
+        train_one_epoch()
+        set_epoch_number(epoch + 1)
+    return "Success"
 
 
 if __name__ == '__main__':

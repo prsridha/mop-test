@@ -1,4 +1,7 @@
+import os
+import json
 import logging
+import tensorflow as tf
 from celery import Celery
 from flask import Flask, request
 from celery.result import AsyncResult
@@ -60,10 +63,6 @@ def get_model_hyperparameters(model_id):
     hyperparameters = properties[model_id]
     return hyperparameters
 
-def restore_model_state(model, model_id, epoch_number):
-    
-    
-    return "RUNNING"
 
 @app.route("/update-model-status", methods=['POST'])
 def set_model_status(model_id=None, status=None):
