@@ -6,6 +6,8 @@ from celery import Celery
 from flask import Flask, request
 from celery.result import AsyncResult
 
+dataset = None
+
 def make_celery(app):
     celery = Celery(app.import_name)
     celery.conf.update(app.config["CELERY_CONFIG"])
@@ -35,17 +37,22 @@ namespace = 'cerebro'
 CHECKPOINT_STORAGE_PATH = "./cerebro_checkpoint_storage/"
 CONFIG_STORAGE_PATH = "./cerebro_config_storage/"
 HYPERPARAM_STORAGE_PATH = "./hyperparameter_properties/"
-WORKER_ENDPOINT = "http://cerebro-service-worker-{}:6000"
+DATA_STORAGE_PATH = "./cerebro_data_storage/"
+# WORKER_ENDPOINT = "http://cerebro-service-worker-{}:6000"
 OPTIONAL_HYPERPARAMS = ['batch_size']
 REQUIRED_HYPERPARAMS = ['learning_rate', 'lambda_value']
 
 
 def get_data():
     #TODO: fix this
-    dataset = {}
-    dataset['train'] = get_petastorm_dataset('train_data')
-    dataset['val'] = get_petastorm_dataset('val_data')
-    return dataset
+    path = os.path.join(DATA_STORAGE_PATH, "tr_x.pkl")
+    with open(path, 'rb') as f:
+        chunk_x = pickle.load(f)
+    path = os.path.join(DATA_STORAGE_PATH, "tr_y.pkl")
+    with open(path, 'rb') as f:
+        chunk_y = pickle.load(f)
+             
+    return chunk_x, chunk_y
 
 def get_model(model_id):
     path = os.path.join(CHECKPOINT_STORAGE_PATH, str(model_id))
@@ -92,10 +99,23 @@ def get_model_status():
     }
     return jsonify(result), 200
 
+@celery.task(name="train_model")
+def train_model(model, dataset, hyperparams):
+    model.fit(dataset['train'], 
+             batch_size = hyperparams['batch_size'] if 'batch_size' in hyperparams else None,
+             epochs=1,
+             validation_data=dataset['val']
+             )
+    loss, accuracy = model.evaluate(dataset['val'], verbose=2)
+    return (model, loss, accuracy)
+
 @app.route("/execute-sub-epoch", methods=['POST'])
 def execute_sub_epoch():
+    global dataset
+    if not dataset:
+        dataset = get_data()
+
     data = request.json
-    dataset = get_data()
     model = get_model(data["model_id"])
     hyperparams = get_model_hyperparameters(data["model_id"])
 
@@ -104,15 +124,9 @@ def execute_sub_epoch():
         logging.info("Restoring checkpoint for model {} => {}".format(data["model_id"], path))
         # restore_model_state(model, data["model_id"], data["epoch_number"])
         set_model_status(data["model_id"], 'RUNNING')
-    
-    # Train the model
-    model.fit(dataset['train'], 
-             batch_size = hyperparams['batch_size'] if 'batch_size' in hyperparams else None,
-             epochs=1,
-             validation_data=dataset['val']
-             )
-    loss, accuracy = model.evaluate(dataset['val'], verbose=2)
 
+    # Train the model
+    model, loss, accuracy = train_model.delay(model, dataset, hyperparams)
 
     logging.info("-------------- Executing Sub-Epoch --------------")
     logging.info("Model summary: {}".format(model.summary()))
