@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import requests
 import numpy as np
 from flask import Flask, request
 
@@ -16,14 +17,100 @@ namespace = 'cerebro'
 CHECKPOINT_STORAGE_PATH = "./cerebro_checkpoint_storage/"
 CONFIG_STORAGE_PATH = "./properties/"
 HYPERPARAM_STORAGE_PATH = "./hyperparameter_properties/"
-WORKER_ENDPOINT = "http://cerebro-service-worker-{}:6000"
+WORKER_ENDPOINT = "http://localhost:{}"
+WORKER_BASEPORT = 9800
 OPTIONAL_HYPERPARAMS = ['batch_size']
 REQUIRED_HYPERPARAMS = ['learning_rate', 'lambda_value']
-
 
 @app.route("/health")
 def health():
     return "Hi this is controller. I'm working!\n"
+
+
+def check_pod_status(label):
+    config.load_config()
+    v1 = client.CoreV1Api()
+    names = []
+    pods_list = v1.list_namespaced_pod(
+        namespace, label_selector=label, watch=False)
+    for pod in pods_list.items:
+        names.append(pod.metadata.name)
+
+    if not names:
+        return False
+
+    for i in names:
+        pod = v1.read_namespaced_pod_status(i, namespace, pretty='true')
+        status = pod.status.phase
+        logging.info("Checking pod status; got - " + status)
+        if status != "Running":
+            return False
+    return True
+
+
+def get_num_workers():
+    # config.load_incluster_config()
+    # api_instance = client.CoreV1Api()
+    # r = api_instance.read_namespaced_config_map(name, namespace, pretty=False)
+    properties_path = os.path.join(
+        CONFIG_STORAGE_PATH, "cerebro-properties.json")
+    properties = json.loads(properties_path)
+    num_workers = properties["num_of_workers"]
+    return num_workers
+
+
+def scheduler():
+    model_worker_pairs = get_model_worker_pairs()
+    num_workers = get_num_workers()
+    task_on_worker = get_task_on_worker()
+    
+    while len(model_worker_pairs) > 0:
+        logging.info("\n*************** (Model, Worker) Queue: {}".format(
+                     model_worker_pairs))
+        for worker_id in range(num_workers):
+            worker_states = get_worker_states()
+            if not worker_states[worker_id]:
+                # When worker is idle
+                runnable_model_id = get_runnable_model(worker_id)
+                logging.info("runnable_model_id, worker_id: {} {}".format(
+                             runnable_model_id, worker_id))
+                if runnable_model_id != -1:
+                    update_model_worker_states(
+                        runnable_model_id, worker_id, True)
+                    data = {
+                        "model_id": runnable_model_id,
+                        "epoch_number": get_epoch_number()
+                    }
+                    content = requests.post(WORKER_ENDPOINT.format(WORKER_BASEPORT + worker_id) +
+                                       "/execute-sub-epoch", json=data)
+                    
+                    task_on_worker = get_task_on_worker()
+                    task_on_worker[worker_id] = content["task_id"]
+                    set_task_on_worker(task_on_worker)
+            else:
+                # Remove (model, worker) pair when the task is complete
+                model_on_worker = get_model_on_worker()
+                running_model_id = model_on_worker[worker_id]
+                logging.info("running_model_id, worker_id: {} {}".format(
+                             running_model_id, worker_id))
+
+                task_on_worker = get_task_on_worker()
+                task_id = task_on_worker["worker_id"]
+                params = {'task_id': str(task_id)}
+                data = requests.get(WORKER_ENDPOINT.format(WORKER_BASEPORT + worker_id) + "/model-status",
+                                    params=params)
+                        
+                task_status = json.loads(data.content)['task_status']
+
+                # Update the model_worker_pairs queue when a task is complete
+                logging.info("Task status = {}".format(status))
+                if task_status == 'SUCCESS':
+                    model_worker_pairs = get_model_worker_pairs()
+                    model_worker_pairs.remove([running_model_id, worker_id])
+                    set_model_worker_pairs(model_worker_pairs)
+                    update_model_worker_states(
+                        running_model_id, worker_id, False)
+
 
 def get_num_epochs():
     # config.load_incluster_config()
@@ -141,7 +228,44 @@ def set_model_on_worker(model_on_worker):
     f = open(path, "w")
     f.write(json.dumps(model_on_worker))
     f.close()
+
+
+def get_task_on_worker():
+    path = os.path.join(CONFIG_STORAGE_PATH, "task-on-worker.json")
+    f = open(path, "r")
+    task_on_worker = json.loads(f.read())
+    f.close()
+    return task_on_worker
+
+
+def set_task_on_worker(task_on_worker):
+    path = os.path.join(CONFIG_STORAGE_PATH, "task-on-worker.json")
+    f = open(path, "w")
+    f.write(json.dumps(task_on_worker))
+    f.close()
     
+
+def init_epoch():
+    num_models = get_num_models()
+    num_workers = get_num_workers()
+
+    # Populate model-worker queue
+    model_worker_pairs = [[i, j] for i in range(num_models)
+                          for j in range(num_workers)]
+    random.shuffle(model_worker_pairs)
+
+    # Initialize model and worker states
+    model_states = {i: False for i in range(num_models)}
+    worker_states = {i: False for i in range(num_workers)}
+    model_on_worker = [-1 for _ in range(num_workers)]
+    task_on_worker = {i: 0 for i in range(num_workers)}
+
+    set_model_worker_pairs(model_worker_pairs)
+    set_model_states(model_states)
+    set_worker_states(worker_states)
+    set_model_on_worker(model_on_worker)
+    set_task_on_worker(task_on_worker)
+
 
 def get_runnable_model(worker_id, is_train=True):
     model_worker_pairs = get_model_worker_pairs()
@@ -153,15 +277,17 @@ def get_runnable_model(worker_id, is_train=True):
     return -1
 
 
-def get_num_workers():
-    # config.load_incluster_config()
+
+def set_hyperparameters(configs):
+    # config.load_config()
     # api_instance = client.CoreV1Api()
-    # r = api_instance.read_namespaced_config_map(name, namespace, pretty=False)
-    properties_path = os.path.join(
-        CONFIG_STORAGE_PATH, "cerebro-properties.json")
-    properties = json.loads(properties_path)
-    num_workers = properties["num_of_workers"]
-    return num_workers
+    # cfm = api_instance.read_namespaced_config_map(name_hyperparam, namespace, pretty=False)
+    # cfm.data["hyperparameter-properties.json"] = json.dumps(configs)
+    # api_instance.patch_namespaced_config_map(name_hyperparam, namespace, body=cfm, pretty=True)
+    
+    f = open(HYPERPARAM_STORAGE_PATH, "w")
+    f.write(json.dumps(configs))
+    f.close()
 
 
 def update_model_worker_states(model_id, worker_id, is_model_running=False):
@@ -189,53 +315,9 @@ def update_model_worker_states(model_id, worker_id, is_model_running=False):
     logging.info("------------------------------------------------- ")
 
 
-def scheduler():
-    model_worker_pairs = get_model_worker_pairs()
-    num_workers = get_num_workers()
 
-    while len(model_worker_pairs) > 0:
-        logging.info("\n*************** (Model, Worker) Queue: {}".format(
-                     model_worker_pairs))
-        reqs = []
-        for worker_id in range(num_workers):
-            worker_states = get_worker_states()
-            if not worker_states[worker_id]:
-                # When worker is idle
-                runnable_model_id = get_runnable_model(worker_id)
-                logging.info("runnable_model_id, worker_id: {} {}".format(
-                             runnable_model_id, worker_id))
-                if runnable_model_id != -1:
-                    update_model_worker_states(
-                        runnable_model_id, worker_id, True)
-                    data = {
-                        "model_id": runnable_model_id,
-                        "epoch_number": get_epoch_number()
-                    }
-                    r = grequests.post(WORKER_ENDPOINT.format(worker_id) +
-                                       "/launch-sub-epoch", json=data)
-                    reqs.append(r)
-            else:
-                # Remove (model, worker) pair when the task is complete
-                model_on_worker = get_model_on_worker()
-                running_model_id = model_on_worker[worker_id]
-                logging.info("running_model_id, worker_id: {} {}".format(
-                             running_model_id, worker_id))
 
-                params = {'model_id': str(running_model_id)}
-                data = requests.get(WORKER_ENDPOINT.format(worker_id) + "/model-status",
-                                    params=params)
-                status = data.json()['status']
 
-                # Update the model_worker_pairs queue when a task is complete
-                logging.info("Task status = {}".format(status))
-                if status == 'COMPLETE':
-                    model_worker_pairs = get_model_worker_pairs()
-                    model_worker_pairs.remove([running_model_id, worker_id])
-                    set_model_worker_pairs(model_worker_pairs)
-                    update_model_worker_states(
-                        running_model_id, worker_id, False)
-
-        rs = grequests.map(reqs, size=num_workers)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
