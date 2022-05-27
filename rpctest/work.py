@@ -14,18 +14,29 @@ class model:
 
 # saved as config file
 status_dict = {}
+data_cache = {}
 
 def initialize_worker():
+    global data_cache
     global status_dict
+    data_cache = {}
     status_dict = {}
     gc.collect()
+
+
+def preload_data_helper(data_cache, input_fn_string, input_paths):
+    input_fn = dill.loads(base64.b64decode(input_fn_string))
+    for input_path in input_paths:
+        if input_path not in data_cache:
+            data_cache[input_path] = input_fn(input_path)
+    return {"message": "Successfully pre-loaded the data..."}
 
 def execute(exec_id, code_string, params):
     func = dill.loads(base64.b64decode(code_string))
 
     def bg_execute(exec_id, func, params):
         try:
-            func_result = func(*params)
+            func_result = func(data_cache, *params)
             status_dict[exec_id] = {"status": "COMPLETED", "result": func_result}
         except Exception as e:
             print(e)

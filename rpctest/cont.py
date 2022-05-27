@@ -4,26 +4,49 @@ import random
 import base64
 from time import sleep
 import xmlrpc.client as xc
+from work import preload_data_helper
 
 class model:
     def __init__(self, n):
         self.n = n
 
-def adder_one(m):
-    sleep(1)
-    print("This adder one")
-    print("THis is m", m)
-    print("THis is type(m)", type(m))
+dill.settings["recurse"] = True
 
-    return m["n"] + 2
+def preload_data(workers, input_fn_string, preload_fn_string, train_partitions):
+    for i, worker in workers.items():
+        worker.initialize_worker()
 
-def adder_two(m):
-    sleep(2)
-    print("THis is m", m)
-    print("THis is type(m)", type(m))
+    exec_ids = []
+    for worker_id, worker in workers.items():
+        exec_id = uuid()
+        print(train_partitions[worker_id])
+        params = [input_fn_string, train_partitions[worker_id]]
+        result = worker.execute(exec_id, preload_fn_string, params)
+        status = dill.loads(base64.b64decode(result.data))
 
-    print("This adder two")
-    return m["n"] + 5
+        if status != "LAUNCHED":
+            raise Exception("Remote job launch failed. Reason: " + status)
+
+        exec_ids.append((exec_id, worker_id))
+
+    # wait for everything to finish
+    while len(exec_ids) > 0:
+        for exec_id, worker_id in exec_ids:
+            worker = workers[worker_id]
+            status = dill.loads(base64.b64decode(worker.status(exec_id).data))
+
+            if status["status"] == "FAILED":
+                print(status)
+                raise Exception("Remote job execution failed")
+            elif status["status"] == "INVALID ID":
+                raise Exception("Invalid Id")
+            elif status["status"] == "COMPLETED":
+                exec_ids.remove((exec_id, worker_id))
+                message = "EVENT: PRELOAD_COMPLETED, WORKER: %d\n" % (worker_id)
+                print(message[:-1])
+        time.sleep(1)
+
+
 
 def get_runnable_model(w, models, model_on_worker, worker_on_model, mw_pair):
     runnable_model = -1
@@ -34,10 +57,12 @@ def get_runnable_model(w, models, model_on_worker, worker_on_model, mw_pair):
                 break
     return runnable_model
 
-def launch_job(worker, func, m):
+def launch_job(worker, model_checkpoint_path, 
+               input_fn_string, model_fn_string,
+               model_config):
     exec_id = ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(32))
-    params = [m]
-    result = worker.execute(exec_id, func, params)
+    params = [model_checkpoint_path, input_fn_string, model_fn_string, train_fn_string, model_config]
+    result = worker.execute(exec_id, model_fn_string, params)
     return exec_id
 
 def check_finished(worker, exec_id):
@@ -48,45 +73,117 @@ def check_finished(worker, exec_id):
     else:
         return False, status
 
-def schedule(worker_ips):
+def log_message(log_file, message, print_message=False):
+    """
+    :param log_file:
+    :param message:
+    :param print_message:
+    """
+    log_file.write(message)
+    log_file.flush()
+    os.fsync(log_file.fileno())
+    if print_message:
+        print(message[:-1])
+
+def mst_identifier(mst):
+    """
+    Utility function to generate a unique identifier for a MST
+    :param mst:
+    :return:
+    """
+    string_id = ""
+    keys = [x for x in mst.keys()]
+    keys.sort()
+    for k in keys:
+        v = mst[k]
+        string_id = string_id + k + ":" + str(v) + "-"
+
+    string_id = string_id[0:-1]
+    return string_id.replace(" ", "_")
+
+def get_model_train_exec(backend='pytorch'):
+    if backend == 'tf':
+        exec_fn_string = base64.b64encode(dill.dumps(tf_execute_helper, byref=False)).decode("ascii")
+    elif backend == 'pytorch':
+        exec_fn_string = base64.b64encode(dill.dumps(pytorch_execute_helper, byref=False)).decode("ascii")
+    return exec_fn_string
+
+
+def schedule(worker_ips, train_partitions, valid_partitions, 
+            input_fn, model_fn, train_fn, initial_msts, preload_data_to_mem:):
+    print(initial_msts)
     workers = {i: xc.ServerProxy(ip) for i, ip in enumerate(worker_ips)}
-    m1 = model(10)
-    m2 = model(20)
 
-    models = [m1, m2]
-
-    adder_one_str = base64.b64encode(dill.dumps(adder_one, byref=False)).decode("ascii")
-    adder_two_str = base64.b64encode(dill.dumps(adder_two, byref=False)).decode("ascii")
-
-    worker_func_mapping = [adder_one_str, adder_two_str]
-
+    current_msts = [(mst_id, mst) for mst_id, mst in enumerate(initial_msts)]
+    model_id_to_mst_mapping = {}
+    for (mst_id, mst) in current_msts:
+         model_id_to_mst_mapping[mst_id] = mst
     nworkers = len(workers)
-    nmodels = len(models)
+    nmodels = len(current_msts)
+    models_list = model_id_to_mst_mapping.keys()
+    model_on_worker = {}
+    for m in models_list:
+        model_on_worker[m] = -1
+    worker_on_model = {}
+    exec_id_on_worker = {}
+    for w in range(nworkers):
+        exec_id_on_worker[w] = None
+        worker_on_model[w] = -1
 
-    model_on_worker = {0: -1, 1:-1}
-    worker_on_model = {0:-1, 1:-1}
-    mw_pair = [[False, False], [False, False]]
-    model_to_build = set([0, 1])
-    models_list = [0, 1]
-    exec_id_on_worker = {0: None, 1: None}
+    mw_pair = []
+    for m in models_list:
+        lis = []
+        for w in range(nworkers):
+            lis.append(False)
+        mw_pair.append(lis)
+
+    
+    model_to_build = set([models_list])
+    
+
+
+    preload_fn_string = base64.b64encode(dill.dumps(preload_data_helper, byref=False)).decode("ascii")
+    input_fn_string = base64.b64encode(dill.dumps(input_fn, byref=False)).decode("ascii")
+    model_fn_string = base64.b64encode(dill.dumps(model_fn, byref=False)).decode("ascii")
+    train_fn_string = base64.b64encode(dill.dumps(train_fn, byref=False)).decode("ascii")
+
+    if preload_data_to_mem:
+        preload_data(workers, input_fn_string, preload_fn_string, train_partitions)
+
+    model_id_ckpt_mapping = {}
+    for mst_id, mst in current_msts:
+        ckpt_path =  "./" + str(mst_id) + "_" + uuid()
+        if not os.path.exists(ckpt_path):
+            os.makedirs(ckpt_path)
+        ckpt_path = ckpt_path + "/{}.model".format(mst_id)
+        print("Checkpoint Path: " + ckpt_path + "\n")
+        model_id_ckpt_mapping[mst_id] = ckpt_path
 
     while (len(model_to_build) > 0):
         for w in range(nworkers):
             if (worker_on_model[w] == -1):
                 m = get_runnable_model(w, models_list, model_on_worker, worker_on_model, mw_pair)
                 if m != -1:
-                    exec_id = launch_job(workers[w], worker_func_mapping[w], models[m])
+                    exec_id = launch_job(workers[w], 
+                                        model_id_ckpt_mapping[m], 
+                                        input_fn_string, 
+                                        model_fn_string, 
+                                        train_fn_string,
+                                        exec_fn_string,
+                                        model_id_to_mst_mapping[m]
+                                        )
                     model_on_worker[m] = w
                     worker_on_model[w] = m
                     exec_id_on_worker[w] = exec_id
-                    print("Sent model {} to build on worker {}".format(str(m), str(w)))
+                    print("Sent model {} to build on worker {} with config {}".format(str(m), str(w), str(model_id_to_mst_mapping[m])))
             else:
                 # poll since this particular worker is busy
                 m = worker_on_model[w]
                 exec_id = exec_id_on_worker[w]
                 completed, status = check_finished(workers[w], exec_id)
                 if completed:
-                    models[m].n = status["result"]
+                    print("Received Model {} built on worker {}".format(str(m), str(w)))
+                    # models[m].n = status["result"]
                     model_on_worker[m] = -1
                     worker_on_model[w] = -1
                     mw_pair[m][w] = True
@@ -98,16 +195,5 @@ def schedule(worker_ips):
                     if model_done:
                         model_to_build.remove(m)
     
-    print("M[0].n", models[0].n)
-    print("M[1].n", models[1].n)
-
-def main():
-    ip0 = "http://localhost:7777"
-    ip1 = "http://localhost:7778"
-
-    schedule([ip0, ip1])
-
-    print("Done")
-
-if __name__ == "__main__":
-    main()
+    # print("M[0].n", models[0].n)
+    # print("M[1].n", models[1].n)
