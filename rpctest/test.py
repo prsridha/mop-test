@@ -6,7 +6,7 @@ import numpy as np
 from tensorflow import keras
 from tensorflow.keras import layers
 
-from cont import schedule
+from cont import find_best_config
 
 
 def input_fn(file_path):
@@ -28,7 +28,7 @@ def model_fn(model_file, x_train, y_train, config):
     lr = config["lr"]
     input_shape = (28, 28, 1)
     num_classes = 10
-    # batch_size = config["batch_size"]
+    batch_size = config["batch_size"]
     if os.path.isfile(model_file):
         model = tf.keras.models.load_model(model_file)
     else:
@@ -48,7 +48,7 @@ def model_fn(model_file, x_train, y_train, config):
         model.compile(loss="categorical_crossentropy", optimizer=opt, metrics=["accuracy"])
     
     print("calling model fit")
-    model.fit(x_train, y_train, batch_size=128, epochs=1)
+    model.fit(x_train, y_train, batch_size=batch_size, epochs=1)
     model.save(model_file)
 
 
@@ -66,6 +66,7 @@ worker_ips = [ip0, ip1]
 
 param_grid = {
         'lr': [1e-1, 1e-2],
+        'batch_size':[64, 128],
 }
 
 param_names = [x for x in param_grid.keys()]
@@ -87,6 +88,6 @@ def find_combinations(combinations, p, i):
 train_configs = []
 find_combinations(train_configs, {}, 0)
 
+nepochs=2
 
-
-schedule(worker_ips, train_partitions, valid_partitions, input_fn, model_fn, train_configs, preload_data_to_mem=True)
+find_best_config(nepochs, worker_ips, train_partitions, valid_partitions, input_fn, model_fn, train_configs, preload_data_to_mem=True)

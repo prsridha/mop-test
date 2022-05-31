@@ -50,6 +50,7 @@ def preload_data(workers, input_fn_string, train_partitions):
 
 def get_runnable_model(w, models, model_on_worker, worker_on_model, mw_pair):
     runnable_model = -1
+    random.shuffle(models)
     for m in models:
         if not (mw_pair[m][w]):
             if model_on_worker[m] == -1:
@@ -132,9 +133,13 @@ def schedule(worker_ips, train_partitions, valid_partitions,
         preload_data(workers, input_fn_string, train_partitions)
 
     model_id_ckpt_mapping = {}
+    if not os.path.exists("./models/"):
+        print("MAKING MODELS DIR")
+        os.makedirs("./models/")
     for mst_id, mst in current_msts:
-        ckpt_path =  "./" + str(mst_id) + "_" + uuid()
+        ckpt_path =  "./models/" + str(mst_id)
         if not os.path.exists(ckpt_path):
+            print("MAKING CHECKPOINT DIR")
             os.makedirs(ckpt_path)
         ckpt_path = ckpt_path + "/{}.model".format(mst_id)
         print("Checkpoint Path: " + ckpt_path + "\n")
@@ -175,7 +180,16 @@ def schedule(worker_ips, train_partitions, valid_partitions,
                     if model_done:
                         model_to_build.remove(m)
                 
-            sleep(5)
+            sleep(1)
     
     # print("M[0].n", models[0].n)
     # print("M[1].n", models[1].n)
+
+
+
+def find_best_config(nepochs, worker_ips, train_partitions, valid_partitions, 
+            input_fn, model_fn, train_configs, preload_data_to_mem):
+        
+        for i in range(nepochs):
+            print("EPOCH: " + str(i+1))
+            schedule(worker_ips, train_partitions, valid_partitions, input_fn, model_fn, train_configs, preload_data_to_mem=True)
