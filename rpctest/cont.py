@@ -1,10 +1,10 @@
+import os
 import dill
 import string
 import random
 import base64
 from time import sleep
 import xmlrpc.client as xc
-from work import preload_data_helper
 
 class model:
     def __init__(self, n):
@@ -12,7 +12,7 @@ class model:
 
 dill.settings["recurse"] = True
 
-def preload_data(workers, input_fn_string, preload_fn_string, train_partitions):
+def preload_data(workers, input_fn_string, train_partitions):
     for i, worker in workers.items():
         worker.initialize_worker()
 
@@ -21,7 +21,7 @@ def preload_data(workers, input_fn_string, preload_fn_string, train_partitions):
         exec_id = uuid()
         print(train_partitions[worker_id])
         params = [input_fn_string, train_partitions[worker_id]]
-        result = worker.execute(exec_id, preload_fn_string, params)
+        result = worker.load_worker_data(exec_id, params)
         status = dill.loads(base64.b64decode(result.data))
 
         if status != "LAUNCHED":
@@ -44,7 +44,7 @@ def preload_data(workers, input_fn_string, preload_fn_string, train_partitions):
                 exec_ids.remove((exec_id, worker_id))
                 message = "EVENT: PRELOAD_COMPLETED, WORKER: %d\n" % (worker_id)
                 print(message[:-1])
-        time.sleep(1)
+        sleep(1)
 
 
 
@@ -57,12 +57,11 @@ def get_runnable_model(w, models, model_on_worker, worker_on_model, mw_pair):
                 break
     return runnable_model
 
-def launch_job(worker, model_checkpoint_path, 
-               input_fn_string, model_fn_string,
-               model_config):
+def launch_job(worker, input_data_path, model_checkpoint_path, 
+               input_fn_string, model_fn_string, model_config):
     exec_id = ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(32))
-    params = [model_checkpoint_path, input_fn_string, model_fn_string, train_fn_string, model_config]
-    result = worker.execute(exec_id, model_fn_string, params)
+    params = [input_data_path, model_checkpoint_path, input_fn_string, model_fn_string, model_config]
+    result = worker.train_model_on_worker(exec_id, params)
     return exec_id
 
 def check_finished(worker, exec_id):
@@ -85,32 +84,15 @@ def log_message(log_file, message, print_message=False):
     if print_message:
         print(message[:-1])
 
-def mst_identifier(mst):
+def uuid():
     """
-    Utility function to generate a unique identifier for a MST
-    :param mst:
+    Utility function to generate unique identifier
     :return:
     """
-    string_id = ""
-    keys = [x for x in mst.keys()]
-    keys.sort()
-    for k in keys:
-        v = mst[k]
-        string_id = string_id + k + ":" + str(v) + "-"
-
-    string_id = string_id[0:-1]
-    return string_id.replace(" ", "_")
-
-def get_model_train_exec(backend='pytorch'):
-    if backend == 'tf':
-        exec_fn_string = base64.b64encode(dill.dumps(tf_execute_helper, byref=False)).decode("ascii")
-    elif backend == 'pytorch':
-        exec_fn_string = base64.b64encode(dill.dumps(pytorch_execute_helper, byref=False)).decode("ascii")
-    return exec_fn_string
-
+    return ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(32))
 
 def schedule(worker_ips, train_partitions, valid_partitions, 
-            input_fn, model_fn, train_fn, initial_msts, preload_data_to_mem:):
+            input_fn, model_fn, initial_msts, preload_data_to_mem):
     print(initial_msts)
     workers = {i: xc.ServerProxy(ip) for i, ip in enumerate(worker_ips)}
 
@@ -120,7 +102,8 @@ def schedule(worker_ips, train_partitions, valid_partitions,
          model_id_to_mst_mapping[mst_id] = mst
     nworkers = len(workers)
     nmodels = len(current_msts)
-    models_list = model_id_to_mst_mapping.keys()
+    models_list = list(model_id_to_mst_mapping.keys())
+    print(models_list)
     model_on_worker = {}
     for m in models_list:
         model_on_worker[m] = -1
@@ -138,17 +121,15 @@ def schedule(worker_ips, train_partitions, valid_partitions,
         mw_pair.append(lis)
 
     
-    model_to_build = set([models_list])
+    model_to_build = set(models_list)
     
 
 
-    preload_fn_string = base64.b64encode(dill.dumps(preload_data_helper, byref=False)).decode("ascii")
     input_fn_string = base64.b64encode(dill.dumps(input_fn, byref=False)).decode("ascii")
     model_fn_string = base64.b64encode(dill.dumps(model_fn, byref=False)).decode("ascii")
-    train_fn_string = base64.b64encode(dill.dumps(train_fn, byref=False)).decode("ascii")
 
     if preload_data_to_mem:
-        preload_data(workers, input_fn_string, preload_fn_string, train_partitions)
+        preload_data(workers, input_fn_string, train_partitions)
 
     model_id_ckpt_mapping = {}
     for mst_id, mst in current_msts:
@@ -164,12 +145,11 @@ def schedule(worker_ips, train_partitions, valid_partitions,
             if (worker_on_model[w] == -1):
                 m = get_runnable_model(w, models_list, model_on_worker, worker_on_model, mw_pair)
                 if m != -1:
-                    exec_id = launch_job(workers[w], 
+                    exec_id = launch_job(workers[w],
+                                        train_partitions[w],
                                         model_id_ckpt_mapping[m], 
                                         input_fn_string, 
-                                        model_fn_string, 
-                                        train_fn_string,
-                                        exec_fn_string,
+                                        model_fn_string,
                                         model_id_to_mst_mapping[m]
                                         )
                     model_on_worker[m] = w
@@ -194,6 +174,8 @@ def schedule(worker_ips, train_partitions, valid_partitions,
                             break
                     if model_done:
                         model_to_build.remove(m)
+                
+            sleep(5)
     
     # print("M[0].n", models[0].n)
     # print("M[1].n", models[1].n)

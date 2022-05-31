@@ -24,30 +24,54 @@ def initialize_worker():
     gc.collect()
 
 
-def preload_data_helper(data_cache, input_fn_string, input_paths):
+def preload_data_helper(data_cache, input_fn_string, input_path):
     input_fn = dill.loads(base64.b64decode(input_fn_string))
-    for input_path in input_paths:
-        if input_path not in data_cache:
-            data_cache[input_path] = input_fn(input_path)
+    if input_path not in data_cache:
+        data_cache[input_path] = input_fn(input_path)
     return {"message": "Successfully pre-loaded the data..."}
 
-def execute(exec_id, code_string, params):
-    func = dill.loads(base64.b64decode(code_string))
+def train_model(data_cache, input_data_path, model_checkpoint_path, input_fn_string, model_fn_string, train_config):
+    input_fn = dill.loads(base64.b64decode(input_fn_string))
+    model_fn = dill.loads(base64.b64decode(model_fn_string))
+    print("training model:" + str(model_checkpoint_path) + " on data " + str(input_data_path))
+    if input_data_path in data_cache:
+        x_train, y_train = data_cache[input_data_path]
+    
+    else:
+        print("data not pre loaded")
+        data = input_fn(input_data_path)
+        data_cache[input_data_path] = data
+        x_train, y_train = data
 
-    def bg_execute(exec_id, func, params):
-        try:
-            func_result = func(data_cache, *params)
-            status_dict[exec_id] = {"status": "COMPLETED", "result": func_result}
-        except Exception as e:
-            print(e)
-            print(traceback.format_exc())
-            sys.stdout.flush()
-            status_dict[exec_id] = {"status": "FAILED"}
+    
+    model_fn(model_checkpoint_path, x_train, y_train, train_config)
+    return {"message": "Successfully submitted model for training"}
 
+    
+
+
+def bg_execute(exec_id, func, params):
+    try:
+        func_result = func(data_cache, *params)
+        status_dict[exec_id] = {"status": "COMPLETED", "result": func_result}
+    except Exception as e:
+        print(e)
+        print(traceback.format_exc())
+        sys.stdout.flush()
+        status_dict[exec_id] = {"status": "FAILED"}
+
+def load_worker_data(exec_id, params):
+    # func = dill.loads(base64.b64decode(code_string))
     status_dict[exec_id] = {"status": "RUNNING"}
-    thread = threading.Thread(target=bg_execute, args=(exec_id, func, params,))
+    thread = threading.Thread(target=bg_execute, args=(exec_id, preload_data_helper, params,))
     thread.start()
+    return base64.b64encode(dill.dumps("LAUNCHED"))
 
+def train_model_on_worker(exec_id, params):
+    # func = dill.loads(base64.b64decode(code_string))
+    status_dict[exec_id] = {"status": "RUNNING"}
+    thread = threading.Thread(target=bg_execute, args=(exec_id, train_model, params,))
+    thread.start()
     return base64.b64encode(dill.dumps("LAUNCHED"))
 
 def status(exec_id):
@@ -68,7 +92,12 @@ def main():
     print('Starting Cerebro worker on {}:{}'.format(args.hostname, args.port))
     server = SimpleXMLRPCServer((args.hostname, args.port), allow_none=True)
 
-    server.register_function(execute)
+
+    server.register_function(preload_data_helper)
+    server.register_function(train_model)
+    server.register_function(bg_execute)
+    server.register_function(load_worker_data)
+    server.register_function(train_model_on_worker)
     server.register_function(status)
     server.register_function(initialize_worker)
     server.register_function(is_live)
