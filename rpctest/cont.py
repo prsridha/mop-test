@@ -92,6 +92,7 @@ def uuid():
     """
     return ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(32))
 
+#TODO: Validation dataset ETL: task parallel validation : what if validation data doesnt fit in memory of worker: bottleneck
 def schedule(worker_ips, train_partitions, valid_partitions, 
             input_fn, model_fn, initial_msts, preload_data_to_mem):
     print(initial_msts)
@@ -179,13 +180,15 @@ def schedule(worker_ips, train_partitions, valid_partitions,
                             break
                     if model_done:
                         model_to_build.remove(m)
-                
+            # TODO: write out execution order in standard format: and also replay schedule(to replay any given scheduler)
             sleep(1)
     
     # print("M[0].n", models[0].n)
     # print("M[1].n", models[1].n)
 
 
+# validation: can do after last sub epoch (track sub epochs): the worker on which the model sees the last shard
+# for the last epoch : along with training, do the validation too on the same worker : last sub epoch: longer time than other sub epochs
 
 def find_best_config(nepochs, worker_ips, train_partitions, valid_partitions, 
             input_fn, model_fn, train_configs, preload_data_to_mem):
