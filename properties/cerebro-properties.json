@@ -1,10 +1,14 @@
 {
-    "num_of_workers":8,
-    "current_epoch": 0,
-    "num_epochs": 5,
+    "worker_ips": ["http://localhost:7777", "http://localhost:7778"],
+    "num_epochs": 2,
     "param_grid": {
-        "learning_rate": [1e-3, 1e-4],
-        "lambda_value": [1e-4, 1e-5],
-        "batch_size": [32, 64, 256, 512]
+        "lr": [
+            1e-1,
+            1e-2
+        ],
+        "batch_size": [
+            64,
+            128
+        ]
     }
 }

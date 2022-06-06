@@ -1,31 +1,23 @@
 import os
-import json
+import sys
+import gc
+import dill
+import argparse
+import base64
+import threading
 import logging
+import traceback
+
+import pickle
+import numpy as np
 import tensorflow as tf
-from celery import Celery
-from flask import Flask, request
-from celery.result import AsyncResult
+from tensorflow import keras
+from tensorflow.keras import layers
+
+from xmlrpc.server import SimpleXMLRPCServer
 
 dataset = None
 
-def make_celery(app):
-    celery = Celery(app.import_name)
-    celery.conf.update(app.config["CELERY_CONFIG"])
-
-    class ContextTask(celery.Task):
-        def __call__(self, *args, **kwargs):
-            with app.app_context():
-                return self.run(*args, **kwargs)
-
-    celery.Task = ContextTask
-    return celery
-
-app = Flask(__name__)
-app.config.update(CELERY_CONFIG={
-    'broker_url': 'redis://localhost:6379',
-    'result_backend': 'redis://localhost:6379',
-})
-celery = make_celery(app)
 logging.basicConfig(filename="worker.log",
                     filemode='a',
                     format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
@@ -36,116 +28,96 @@ namespace = 'cerebro'
 
 CHECKPOINT_STORAGE_PATH = "./cerebro_checkpoint_storage/"
 CONFIG_STORAGE_PATH = "./cerebro_config_storage/"
-HYPERPARAM_STORAGE_PATH = "./hyperparameter_properties/"
 DATA_STORAGE_PATH = "./cerebro_data_storage/"
-# WORKER_ENDPOINT = "http://cerebro-service-worker-{}:6000"
-OPTIONAL_HYPERPARAMS = ['batch_size']
-REQUIRED_HYPERPARAMS = ['learning_rate', 'lambda_value']
+
+# saved as config file
+status_dict = {}
+data_cache = {}
+
+def initialize_worker():
+    global data_cache
+    global status_dict
+    data_cache = {}
+    status_dict = {}
+    gc.collect()
+
+def preload_data_helper(data_cache, input_fn_string, input_path):
+    input_fn = dill.loads(base64.b64decode(input_fn_string))
+    if input_path not in data_cache:
+        data_cache[input_path] = input_fn(input_path)
+    logging.info("Successfully pre-loaded the data...")
+    return {"message": "Successfully pre-loaded the data..."}
+
+def train_model(data_cache, input_data_path, model_checkpoint_path, input_fn_string, model_fn_string, train_config):
+    input_fn = dill.loads(base64.b64decode(input_fn_string))
+    model_fn = dill.loads(base64.b64decode(model_fn_string))
+    print("training model:" + str(model_checkpoint_path) + " on data " + str(input_data_path))
+    if input_data_path in data_cache:
+        x_train, y_train = data_cache[input_data_path]
+    
+    else:
+        print("data not pre loaded")
+        data = input_fn(input_data_path)
+        data_cache[input_data_path] = data
+        x_train, y_train = data
+
+    model_fn(model_checkpoint_path, x_train, y_train, train_config)
+    return {"message": "Successfully submitted model for training"}
+
+def bg_execute(exec_id, func, params):
+    try:
+        func_result = func(data_cache, *params)
+        status_dict[exec_id] = {"status": "COMPLETED", "result": func_result}
+    except Exception as e:
+        print(e)
+        print(traceback.format_exc())
+        sys.stdout.flush()
+        status_dict[exec_id] = {"status": "FAILED"}
 
 
-def get_data():
-    #TODO: fix this
-    path = os.path.join(DATA_STORAGE_PATH, "tr_x.pkl")
-    with open(path, 'rb') as f:
-        chunk_x = pickle.load(f)
-    path = os.path.join(DATA_STORAGE_PATH, "tr_y.pkl")
-    with open(path, 'rb') as f:
-        chunk_y = pickle.load(f)
-             
-    return chunk_x, chunk_y
+def load_worker_data(exec_id, params):
+    # func = dill.loads(base64.b64decode(code_string))
+    status_dict[exec_id] = {"status": "RUNNING"}
+    thread = threading.Thread(target=bg_execute, args=(exec_id, preload_data_helper, params,))
+    thread.start()
+    return base64.b64encode(dill.dumps("LAUNCHED"))
 
-def get_model(model_id):
-    path = os.path.join(CHECKPOINT_STORAGE_PATH, str(model_id))
-    model = tf.keras.models.load_model(path)
-    return model
-
-def get_model_hyperparameters(model_id):
-    # config.load_incluster_config()
-    # api_instance = client.CoreV1Api()
-    # r = api_instance.read_namespaced_config_map(name, namespace, pretty=False)
-    f = open(HYPERPARAM_STORAGE_PATH, "r")
-    properties = json.loads(f.read())
-    f.close()
-
-    hyperparameters = properties[model_id]
-    return hyperparameters
+def train_model_on_worker(exec_id, params):
+    # func = dill.loads(base64.b64decode(code_string))
+    status_dict[exec_id] = {"status": "RUNNING"}
+    thread = threading.Thread(target=bg_execute, args=(exec_id, train_model, params,))
+    thread.start()
+    return base64.b64encode(dill.dumps("LAUNCHED"))
 
 
-@app.route("/update-model-status", methods=['POST'])
-def set_model_status(model_id=None, status=None):
-    if model_id is None and status is None:
-        data = request.json
-        model_id = data['model_id']
-        status = data['status']
-    path = os.path.join(CHECKPOINT_STORAGE_PATH, str(model_id), "running_status.txt")
-    with open(path, 'w') as f:
-        f.write(str(status))
-    return "Success"
+def status(exec_id):
+    if exec_id in status_dict:
+        return base64.b64encode(dill.dumps(status_dict[exec_id]))
+    else:
+        return base64.b64encode(dill.dumps({"status": "INVALID ID"}))
+
+def is_live():
+    return True
+
+def main():
+    parser = argparse.ArgumentParser(description='Argument parser for generating model predictions.')
+    parser.add_argument('--hostname', help='Worker host name', default='0.0.0.0')
+    parser.add_argument('--port', help='Worker port', default=7777, type=int)
+    args = parser.parse_args()
+
+    print('Starting Cerebro worker on {}:{}'.format(args.hostname, args.port))
+    server = SimpleXMLRPCServer((args.hostname, args.port), allow_none=True)
 
 
-@app.route("/health")
-def health():
-    return "Hi this is worker. I'm working!\n"
-
-@app.route("/model-status")
-def get_model_status():
-    task_id = request.args.get('task_id')
-
-    task_result = celery.AsyncResult(task_id)
-    result = {
-        "task_id": task_id,
-        "task_status": task_result.status,
-        "task_result": task_result.result
-    }
-    return jsonify(result), 200
-
-@celery.task(name="train_model")
-def train_model(model, dataset, hyperparams):
-    model.fit(dataset['train'], 
-             batch_size = hyperparams['batch_size'] if 'batch_size' in hyperparams else None,
-             epochs=1,
-             validation_data=dataset['val']
-             )
-    loss, accuracy = model.evaluate(dataset['val'], verbose=2)
-    return (model, loss, accuracy)
-
-@app.route("/execute-sub-epoch", methods=['POST'])
-def execute_sub_epoch():
-    global dataset
-    if not dataset:
-        dataset = get_data()
-
-    data = request.json
-    model = get_model(data["model_id"])
-    hyperparams = get_model_hyperparameters(data["model_id"])
-
-    path = os.path.join(CHECKPOINT_STORAGE_PATH, "{}/saved_model.pb".format(data["model_id"]))
-    if os.path.exists(path):
-        logging.info("Restoring checkpoint for model {} => {}".format(data["model_id"], path))
-        # restore_model_state(model, data["model_id"], data["epoch_number"])
-        set_model_status(data["model_id"], 'RUNNING')
-
-    # Train the model
-    model, loss, accuracy = train_model.delay(model, dataset, hyperparams)
-
-    logging.info("-------------- Executing Sub-Epoch --------------")
-    logging.info("Model summary: {}".format(model.summary()))
-    logging.info("Loss (validation set): {}".format(loss))
-    logging.info("Accuracy (validation set): {}".format(accuracy))
-    logging.info("-------------------------------------------------")
-    save_model_state(model, data["model_id"], data["epoch_number"])
-    return "Success"
-
-@app.route("/update-model-status", methods=['POST'])
-def set_model_status(model_id=None, status=None):
-    if model_id is None and status is None:
-        data = request.json
-        model_id = data['model_id']
-        status = data['status']
-    path = os.path.join(CHECKPOINT_STORAGE_PATH, str(model_id), "running_status.txt")
-    with open(path, 'w') as f:
-        f.write(str(status))
-    return "Success"
+    server.register_function(preload_data_helper)
+    server.register_function(train_model)
+    server.register_function(bg_execute)
+    server.register_function(load_worker_data)
+    server.register_function(train_model_on_worker)
+    server.register_function(status)
+    server.register_function(initialize_worker)
+    server.register_function(is_live)
+    server.serve_forever()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=9876)
+    main()

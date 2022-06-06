@@ -1,17 +1,16 @@
 import os
+import pickle
 import json
+import dill
+import string
+import pprint
+import base64
 import random
 import logging
-import requests
 import itertools
-import numpy as np
 from time import sleep
-import tensorflow as tf
-from pathlib import Path
-from tensorflow import keras
-from flask import Flask, request
+import xmlrpc.client as xc
 
-app = Flask(__name__)
 logging.basicConfig(filename="controller.log",
                     filemode='a',
                     format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
@@ -22,109 +21,30 @@ namespace = 'cerebro'
 
 CHECKPOINT_STORAGE_PATH = "./cerebro_checkpoint_storage/"
 CONFIG_STORAGE_PATH = "./properties/"
-HYPERPARAM_STORAGE_PATH = "./hyperparameter_properties/"
-WORKER_ENDPOINT = "http://localhost:{}"
-WORKER_BASEPORT = 9800
-OPTIONAL_HYPERPARAMS = ['batch_size']
-REQUIRED_HYPERPARAMS = ['learning_rate', 'lambda_value']
-
-@app.route("/health")
-def health():
-    return "Hi this is controller. I'm working!\n"
 
 
-def check_pod_status(label):
-    config.load_config()
-    v1 = client.CoreV1Api()
-    names = []
-    pods_list = v1.list_namespaced_pod(
-        namespace, label_selector=label, watch=False)
-    for pod in pods_list.items:
-        names.append(pod.metadata.name)
-
-    if not names:
-        return False
-
-    for i in names:
-        pod = v1.read_namespaced_pod_status(i, namespace, pretty='true')
-        status = pod.status.phase
-        logging.info("Checking pod status; got - " + status)
-        if status != "Running":
-            return False
-    return True
-
-
-def get_num_workers():
+def get_worker_ips():
     # config.load_incluster_config()
     # api_instance = client.CoreV1Api()
     # r = api_instance.read_namespaced_config_map(name, namespace, pretty=False)
     properties_path = os.path.join(
         CONFIG_STORAGE_PATH, "cerebro-properties.json")
-    properties = json.loads(properties_path)
-    num_workers = properties["num_of_workers"]
-    return num_workers
 
-
-def scheduler():
-    model_worker_pairs = get_model_worker_pairs()
-    num_workers = get_num_workers()
-    task_on_worker = get_task_on_worker()
-    
-    while len(model_worker_pairs) > 0:
-        logging.info("\n*************** (Model, Worker) Queue: {}".format(
-                     model_worker_pairs))
-        for worker_id in range(num_workers):
-            worker_states = get_worker_states()
-            if not worker_states[worker_id]:
-                # When worker is idle
-                runnable_model_id = get_runnable_model(worker_id)
-                logging.info("runnable_model_id, worker_id: {} {}".format(
-                             runnable_model_id, worker_id))
-                if runnable_model_id != -1:
-                    update_model_worker_states(
-                        runnable_model_id, worker_id, True)
-                    data = {
-                        "model_id": runnable_model_id,
-                        "epoch_number": get_epoch_number()
-                    }
-                    content = requests.post(WORKER_ENDPOINT.format(WORKER_BASEPORT + worker_id) +
-                                       "/execute-sub-epoch", json=data)
-                    
-                    task_on_worker = get_task_on_worker()
-                    task_on_worker[worker_id] = content["task_id"]
-                    set_task_on_worker(task_on_worker)
-            else:
-                # Remove (model, worker) pair when the task is complete
-                model_on_worker = get_model_on_worker()
-                running_model_id = model_on_worker[worker_id]
-                logging.info("running_model_id, worker_id: {} {}".format(
-                             running_model_id, worker_id))
-
-                task_on_worker = get_task_on_worker()
-                task_id = task_on_worker["worker_id"]
-                params = {'task_id': str(task_id)}
-                data = requests.get(WORKER_ENDPOINT.format(WORKER_BASEPORT + worker_id) + "/model-status",
-                                    params=params)
-                        
-                task_status = json.loads(data.content)['task_status']
-
-                # Update the model_worker_pairs queue when a task is complete
-                logging.info("Task status = {}".format(status))
-                if task_status == 'SUCCESS':
-                    model_worker_pairs = get_model_worker_pairs()
-                    model_worker_pairs.remove([running_model_id, worker_id])
-                    set_model_worker_pairs(model_worker_pairs)
-                    update_model_worker_states(
-                        running_model_id, worker_id, False)
+    properties = None
+    with open(properties_path, 'r') as fp:
+        properties = json.load(fp)
+    worker_ips = properties["worker_ips"]
+    return worker_ips
 
 
 def get_num_epochs():
     # config.load_incluster_config()
     # api_instance = client.CoreV1Api()
     # r = api_instance.read_namespaced_config_map(name, namespace, pretty=False)
-    properties_path = os.path.join(
-        CONFIG_STORAGE_PATH, "cerebro-properties.json")
-    properties = json.loads(properties_path)
+    properties_path = os.path.join(CONFIG_STORAGE_PATH, "cerebro-properties.json")
+    properties = None
+    with open(properties_path, 'r') as fp:
+        properties = json.load(fp)
     num_epochs = properties["num_epochs"]
     return num_epochs
 
@@ -134,15 +54,11 @@ def get_param_grid():
     # api_instance = client.CoreV1Api()
     # r = api_instance.read_namespaced_config_map(name, namespace, pretty=False)
     properties_path = os.path.join(CONFIG_STORAGE_PATH, "cerebro-properties.json")
-    properties = json.loads(properties_path)
+    properties = None
+    with open(properties_path, 'r') as fp:
+        properties = json.load(fp)
     param_grid = properties["param_grid"]
     return param_grid
-
-
-def get_num_models():
-    param_grid = get_param_grid()
-    config_sizes = [len(param_grid[key]) for key in param_grid]
-    return np.prod(config_sizes)
 
 
 def get_worker_states():
@@ -163,236 +79,319 @@ def set_worker_states(worker_states):
     f.close()
 
 
-def get_epoch_number():
-    # config.load_incluster_config()
-    # api_instance = client.CoreV1Api()
-    # r = api_instance.read_namespaced_config_map(name, namespace, pretty=False)
-    properties_path = os.path.join(
-        CONFIG_STORAGE_PATH, "cerebro-properties.json")
-    properties = json.loads(properties_path)
-    epoch_number = properties["current_epoch"]
-    return epoch_number
-
-
-def set_epoch_number(epoch_number):
-    # config.load_incluster_config()
-    # api_instance = client.CoreV1Api()
-    # cfm = api_instance.read_namespaced_config_map(name, namespace, pretty=False)
-    properties_path = os.path.join(
-      CONFIG_STORAGE_PATH, "cerebro-properties.json")
-    properties = json.loads(properties_path)
-    properties["current_epoch"] = epoch_number
-    with open(properties_path, "w") as f:
-        f.write(json.dumps(properties))
-    # api_instance.patch_namespaced_config_map(
-    #     name, namespace, body=cfm, pretty=True)
-
-
-def get_model_states():
-    path = os.path.join(CONFIG_STORAGE_PATH, "model-states.json")
-    f = open(path, "r")
-    model_states_json = json.loads(f.read())
-    model_states = {}
-    for key in model_states_json:
-        model_states[int(key)] = model_states_json[key]
-    f.close()
-    return model_states
-
-
-def set_model_states(model_states):
-    path = os.path.join(CONFIG_STORAGE_PATH, "model-states.json")
-    f = open(path, "w")
-    f.write(json.dumps(model_states))
-    f.close()
-
-
 def get_model_worker_pairs():
-    path = os.path.join(CONFIG_STORAGE_PATH, "model-worker-pairs.json")
-    f = open(path, "r")
-    model_worker_pairs = json.loads(f.read())
-    f.close()
+    path = os.path.join(CONFIG_STORAGE_PATH, "model-worker-pairs.pkl")
+    
+    model_worker_pairs = None
+    with open(path, 'rb') as fp:
+        model_worker_pairs = pickle.load(fp)
     return model_worker_pairs
 
 
 def set_model_worker_pairs(model_worker_pairs):
-    path = os.path.join(CONFIG_STORAGE_PATH, "model-worker-pairs.json")
-    f = open(path, "w")
-    f.write(json.dumps(model_worker_pairs))
-    f.close()
+    path = os.path.join(CONFIG_STORAGE_PATH, "model-worker-pairs.pkl")
+    
+    with open(path, 'wb') as fp:
+        pickle.dump(model_worker_pairs, fp)
 
 
 def get_model_on_worker():
-    path = os.path.join(CONFIG_STORAGE_PATH, "model-on-worker.json")
-    f = open(path, "r")
-    model_on_worker = json.loads(f.read())
-    f.close()
+    path = os.path.join(CONFIG_STORAGE_PATH, "model-on-worker.pkl")
+    
+    model_on_worker = None
+    with open(path, 'rb') as fp:
+        model_on_worker = pickle.load(fp)
     return model_on_worker
 
 
 def set_model_on_worker(model_on_worker):
-    path = os.path.join(CONFIG_STORAGE_PATH, "model-on-worker.json")
-    f = open(path, "w")
-    f.write(json.dumps(model_on_worker))
-    f.close()
+    path = os.path.join(CONFIG_STORAGE_PATH, "model-on-worker.pkl")
+
+    print(model_on_worker)
+    with open(path, 'wb') as fp:
+        pickle.dump(model_on_worker, fp)
 
 
-def get_task_on_worker():
-    path = os.path.join(CONFIG_STORAGE_PATH, "task-on-worker.json")
-    f = open(path, "r")
-    task_on_worker = json.loads(f.read())
-    f.close()
-    return task_on_worker
+
+def get_worker_on_model():
+    path = os.path.join(CONFIG_STORAGE_PATH, "worker_on_model.pkl")
+    
+    worker_on_model = None
+    with open(path, 'rb') as fp:
+        worker_on_model = pickle.load(fp)
+    return worker_on_model
 
 
-def set_task_on_worker(task_on_worker):
-    path = os.path.join(CONFIG_STORAGE_PATH, "task-on-worker.json")
-    f = open(path, "w")
-    f.write(json.dumps(task_on_worker))
-    f.close()
+def set_worker_on_model(worker_on_model):
+    path = os.path.join(CONFIG_STORAGE_PATH, "worker_on_model.pkl")
+    
+    with open(path, 'wb') as fp:
+        pickle.dump(worker_on_model, fp)
+
+
+def get_config_on_model():
+    path = os.path.join(CONFIG_STORAGE_PATH, "config_on_model.pkl")
+    
+    config_on_model = None
+    with open(path, 'rb') as fp:
+        config_on_model = pickle.load(fp)
+    return config_on_model
+
+
+def set_config_on_model(config_on_model):
+    path = os.path.join(CONFIG_STORAGE_PATH, "config_on_model.pkl")
+    
+    with open(path, 'wb') as fp:
+        pickle.dump(config_on_model, fp)
     
 
-def init_epoch():
-    num_models = get_num_models()
-    num_workers = get_num_workers()
-
-    # Populate model-worker queue
-    model_worker_pairs = [[i, j] for i in range(num_models)
-                          for j in range(num_workers)]
-    random.shuffle(model_worker_pairs)
-
-    # Initialize model and worker states
-    model_states = {i: False for i in range(num_models)}
-    worker_states = {i: False for i in range(num_workers)}
-    model_on_worker = [-1 for _ in range(num_workers)]
-    task_on_worker = {i: 0 for i in range(num_workers)}
-
-    set_model_worker_pairs(model_worker_pairs)
-    set_model_states(model_states)
-    set_worker_states(worker_states)
-    set_model_on_worker(model_on_worker)
-    set_task_on_worker(task_on_worker)
-
-
-def get_runnable_model(worker_id, is_train=True):
-    model_worker_pairs = get_model_worker_pairs()
-    model_states = get_model_states()
-
-    for m, w in model_worker_pairs:
-        if w == worker_id and ((is_train and not model_states[m]) or not is_train):
-            return m
-    return -1
-
-
-def set_hyperparameters(configs):
-    # config.load_config()
-    # api_instance = client.CoreV1Api()
-    # cfm = api_instance.read_namespaced_config_map(name_hyperparam, namespace, pretty=False)
-    # cfm.data["hyperparameter-properties.json"] = json.dumps(configs)
-    # api_instance.patch_namespaced_config_map(name_hyperparam, namespace, body=cfm, pretty=True)
+def get_execid_on_worker():
+    path = os.path.join(CONFIG_STORAGE_PATH, "execid_on_worker.pkl")
     
-    f = open(HYPERPARAM_STORAGE_PATH, "w")
-    f.write(json.dumps(configs))
-    f.close()
+    execid_on_worker = None
+    with open(path, 'rb') as fp:
+        execid_on_worker = pickle.load(fp)
+    return execid_on_worker
 
 
-def update_model_worker_states(model_id, worker_id, is_model_running=False):
-    model_on_worker_id = model_id if is_model_running else -1
-
-    model_states = get_model_states()
-    worker_states = get_worker_states()
-    model_on_worker = get_model_on_worker()
-
-    model_states[model_id] = is_model_running
-    worker_states[worker_id] = is_model_running
-    model_on_worker[worker_id] = model_on_worker_id
-
-    set_model_states(model_states)
-    set_worker_states(worker_states)
-    set_model_on_worker(model_on_worker)
-
-    logging.info("-------- Updated model and worker states -------- ")
-    logging.info("model_states[{}]: {}".format(
-        model_id, model_states[model_id]))
-    logging.info("worker_states[{}]: {}".format(
-        worker_id, worker_states[worker_id]))
-    logging.info("model_on_worker[{}]: {}".format(
-        worker_id, model_on_worker[worker_id]))
-    logging.info("------------------------------------------------- ")
+def set_execid_on_worker(execid_on_worker):
+    path = os.path.join(CONFIG_STORAGE_PATH, "execid_on_worker.pkl")
+    
+    with open(path, 'wb') as fp:
+        pickle.dump(execid_on_worker, fp)
 
 
-def create_model(param_dict):
-    model = keras.models.Sequential()
-    model.add(keras.layers.Dense(1000, activation='relu',
-                                    input_shape=(7306,)))
-    model.add(keras.layers.Dense(500, activation='relu'))
-    model.add(keras.layers.Dense(2, activation='softmax'))
-
-    regularizer = keras.regularizers.l2(param_dict['lambda_value'])
-    for layer in model.layers:
-        for attr in ['kernel_regularizer', 'bias_regularizer']:
-            if hasattr(layer, attr):
-                setattr(layer, attr, regularizer)
-        for attr in ['kernel_initializer', 'bias_initializer']:
-            if hasattr(layer, attr):
-                layer_initializer = getattr(layer, attr)
-                if hasattr(layer_initializer, 'seed'):
-                    setattr(layer_initializer, 'seed', 2018)
-
-    optimizer = keras.optimizers.Adam(learning_rate=param_dict['learning_rate'])
-    model.compile(optimizer=optimizer,
-                loss=tf.losses.CategoricalCrossentropy(from_logits=True),
-                metrics=['accuracy'])
-    return model
+def get_model_on_checkpoint():
+    path = os.path.join(CONFIG_STORAGE_PATH, "model_on_checkpoint.pkl")
+    
+    model_on_checkpoint = None
+    with open(path, 'rb') as fp:
+        model_on_checkpoint = pickle.load(fp)
+    return model_on_checkpoint
 
 
-def init_and_save_models():
+def set_model_on_checkpoint(model_on_checkpoint):
+    path = os.path.join(CONFIG_STORAGE_PATH, "model_on_checkpoint.pkl")
+    
+    with open(path, 'wb') as fp:
+        pickle.dump(model_on_checkpoint, fp)
+
+
+
+def uuid():
+    """
+    Utility function to generate unique identifier
+    :return:
+    """
+    return ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(32))
+
+
+def check_finished(worker, exec_id):
+    result = worker.status(exec_id)
+    status = dill.loads(base64.b64decode(result.data))
+    if status["status"] == "COMPLETED":
+        return True, status
+    else:
+        return False, status
+
+
+def get_runnable_model(w, models, model_on_worker, mw_pair):
+    runnable_model = -1
+    random.shuffle(models)
+    for m in models:
+        if not (mw_pair[m][w]):
+            if model_on_worker[m] == -1:
+                runnable_model = m
+                break
+    return runnable_model
+
+
+def preload_data(workers, input_fn_string, train_partitions):
+    for i, worker in workers.items():
+        worker.initialize_worker()
+
+    exec_ids = []
+    for worker_id, worker in workers.items():
+        exec_id = uuid()
+        print(train_partitions[worker_id])
+        params = [input_fn_string, train_partitions[worker_id]]
+        result = worker.load_worker_data(exec_id, params)
+        status = dill.loads(base64.b64decode(result.data))
+
+        if status != "LAUNCHED":
+            raise Exception("Remote job launch failed. Reason: " + status)
+
+        exec_ids.append((exec_id, worker_id))
+
+    # wait for everything to finish
+    while len(exec_ids) > 0:
+        for exec_id, worker_id in exec_ids:
+            worker = workers[worker_id]
+            status = dill.loads(base64.b64decode(worker.status(exec_id).data))
+
+            if status["status"] == "FAILED":
+                print(status)
+                raise Exception("Remote job execution failed")
+            elif status["status"] == "INVALID ID":
+                raise Exception("Invalid Id")
+            elif status["status"] == "COMPLETED":
+                exec_ids.remove((exec_id, worker_id))
+                message = "EVENT: PRELOAD_COMPLETED, WORKER: %d\n" % (worker_id)
+                print(message[:-1])
+        sleep(1)
+
+
+def find_combinations():
     param_grid = get_param_grid()
-    param_keys = param_grid.keys()
-
-    for key in param_keys:
-        if key not in REQUIRED_HYPERPARAMS + OPTIONAL_HYPERPARAMS:
-            raise Exception(
-                '{} is not a hyperparameter the system recogises.'.format(key))
-
-    for hyperparam in REQUIRED_HYPERPARAMS:
-        if hyperparam not in param_keys:
-            raise Exception(
-                '{} is a required hyperparameter but was not specified in the'
-                ' configuration.'.format(hyperparam))
+    param_keys = list(param_grid.keys())
 
     params_list = [param_grid[key] for key in param_keys]
-    param_combinations = list(itertools.product(*params_list))
-    configs = {}
-    for model_id, combination in enumerate(param_combinations):
-        param_dict = {key: val for key, val in zip(param_keys, combination)}
-        configs[model_id] = param_dict
-        model = create_model(param_dict)
-        path = os.path.join(CHECKPOINT_STORAGE_PATH, str(model_id))
-        Path(path).mkdir(parents=True, exist_ok=True)
-        model.save(path)
+    combinations = list(itertools.product(*params_list))
+    
+    param_combinations = []
+    for comb in combinations:
+        d = {}
+        for i in range(len(comb)):
+            d[param_keys[i]] = comb[i]
+        param_combinations.append(d)
 
-    set_hyperparameter(configs)
-        
+    return param_combinations
 
-@app.route("/train-one-epoch", methods=['GET'])
-def train_one_epoch():
+
+def init_epoch():
+    worker_ips = get_worker_ips()
+    nworkers = len(worker_ips)
+
+    initial_msts = find_combinations()
+    logging.info("Initial msts: " + pprint.pformat(initial_msts))
+    print(initial_msts)
+
+    model_id_to_mst_mapping = {}
+    current_msts = [(mst_id, mst) for mst_id, mst in enumerate(initial_msts)]
+    for (mst_id, mst) in current_msts:
+        model_id_to_mst_mapping[mst_id] = mst
+
+    models_list = list(model_id_to_mst_mapping.keys())
+    logging.info("Models list: " + str(models_list))
+    print(models_list)
+
+    model_on_worker = {}
+    for m in models_list:
+        model_on_worker[m] = -1
+    worker_on_model = {}
+    exec_id_on_worker = {}
+    for w in range(nworkers):
+        exec_id_on_worker[w] = None
+        worker_on_model[w] = -1
+
+    mw_pair = []
+    for m in models_list:
+        lis = []
+        for w in range(nworkers):
+            lis.append(False)
+        mw_pair.append(lis)
+
+    model_id_ckpt_mapping = {}
+    if not os.path.exists("./models/"):
+        print("MAKING MODELS DIR")
+        os.makedirs("./models/")
+    for mst_id, mst in current_msts:
+        ckpt_path =  "./models/" + str(mst_id)
+        if not os.path.exists(ckpt_path):
+            print("MAKING CHECKPOINT DIR")
+            os.makedirs(ckpt_path)
+        ckpt_path = ckpt_path + "/{}.model".format(mst_id)
+        print("Checkpoint Path: " + ckpt_path + "\n")
+        model_id_ckpt_mapping[mst_id] = ckpt_path
+
+    set_config_on_model(model_id_to_mst_mapping)
+    set_model_on_worker(model_on_worker)
+    set_worker_on_model(worker_on_model)
+    set_execid_on_worker(exec_id_on_worker)
+    set_model_worker_pairs(mw_pair)
+    set_model_on_checkpoint(model_id_ckpt_mapping)
+
+
+def launch_job(worker, input_data_path, model_checkpoint_path, 
+               input_fn_string, model_fn_string, model_config):
+    exec_id = ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(32))
+    params = [input_data_path, model_checkpoint_path, input_fn_string, model_fn_string, model_config]
+    result = worker.train_model_on_worker(exec_id, params)
+    return exec_id
+
+
+def scheduler(workers, train_partitions, valid_partitions, model_fn, input_fn):
+    model_id_to_mst_mapping = get_config_on_model()
+    model_on_worker = get_model_on_worker()
+    worker_on_model = get_worker_on_model()
+    mw_pair = get_model_worker_pairs()
+    model_id_ckpt_mapping = get_model_on_checkpoint()
+    exec_id_on_worker = get_execid_on_worker()
+
+    nworkers = len(workers)
+    
+    models_list = list(model_id_to_mst_mapping.keys())
+    model_to_build = set(model_id_to_mst_mapping.keys())
+
+    model_fn_string = base64.b64encode(dill.dumps(model_fn, byref=False)).decode("ascii")
+    input_fn_string = base64.b64encode(dill.dumps(input_fn, byref=False)).decode("ascii")
+    
+    while (len(model_to_build) > 0):
+        for w in range(nworkers):
+            if (worker_on_model[w] == -1):
+                m = get_runnable_model(w, models_list, model_on_worker, mw_pair)
+                if m != -1:
+                    exec_id = launch_job(workers[w],
+                                        train_partitions[w],
+                                        model_id_ckpt_mapping[m],
+                                        input_fn_string,
+                                        model_fn_string,
+                                        model_id_to_mst_mapping[m]
+                                        )
+                    model_on_worker[m] = w
+                    model_on_worker[w] = m
+                    exec_id_on_worker[w] = exec_id
+                    
+                    set_model_on_worker(model_on_worker)
+                    set_worker_on_model(model_on_worker)
+                    set_execid_on_worker(exec_id_on_worker)
+
+                    print("Sent model {} to build on worker {} with config {}".format(str(m), str(w), str(model_id_to_mst_mapping[m])))
+            else:
+                # poll since this particular worker is busy
+                m = worker_on_model[w]
+                exec_id = exec_id_on_worker[w]
+                completed, status = check_finished(workers[w], exec_id)
+                if completed:
+                    print("Received Model {} built on worker {}".format(str(m), str(w)))
+                    # models[m].n = status["result"]
+                    model_on_worker[m] = -1
+                    worker_on_model[w] = -1
+                    mw_pair[m][w] = True
+                    model_done = True
+                    for i in range(nworkers):
+                        if not mw_pair[m][i]:
+                            model_done = False
+                            break
+                    if model_done:
+                        model_to_build.remove(m)
+
+                set_model_on_worker(model_on_worker)
+                set_worker_on_model(model_on_worker)
+                set_model_worker_pairs(mw_pair)
+            # TODO: write out execution order in standard format: and also replay schedule(to replay any given scheduler)
+            sleep(1)
+
+
+def grid_search(train_partitions, valid_partitions, input_fn, model_fn):
     init_epoch()
-    scheduler()
-    return "Success"
-
-@app.route("/init", methods=['GET'])
-def init():
-    init_and_save_models()
-    return "Success"
-
-@app.route("/train", methods=['GET'])
-def train():
+    
+    worker_ips = get_worker_ips()
     num_epochs = get_num_epochs()
-    for epoch in range(num_epochs):
-        train_one_epoch()
-        set_epoch_number(epoch + 1)
-    return "Success"
+    input_fn_string = base64.b64encode(dill.dumps(input_fn, byref=False)).decode("ascii")
+    workers = {i: xc.ServerProxy(ip) for i, ip in enumerate(worker_ips)}
+    preload_data(workers, input_fn_string, train_partitions)
 
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    for i in range(num_epochs):
+        print("EPOCH: " + str(i+1))
+        scheduler(workers, train_partitions, valid_partitions, model_fn, input_fn)
