@@ -6,7 +6,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
-from controller import grid_search
+from controller import CerebroController
 
 def input_fn(file_path):
     num_classes = 10
@@ -51,13 +51,26 @@ def model_fn(model_file, x_train, y_train, config):
     model.save(model_file)
 
 def main():
+    worker_ips = ["http://localhost:7777", "http://localhost:7778"]
+
     shard1_path = "/users/prsridha/mop-test/MNIST/dataset/shards/1"
     shard2_path = "/users/prsridha/mop-test/MNIST/dataset/shards/2"
     train_partitions = [shard1_path, shard2_path]
-
     valid_partitions = []
 
-    grid_search(train_partitions, valid_partitions, input_fn, model_fn)
+    num_epochs = 2
+    param_grid =  {
+        "lr": [
+            1e-2,
+            2e-2
+        ],
+        "batch_size": [
+            64
+        ]
+    }
+
+    controller = CerebroController(worker_ips, num_epochs, param_grid, train_partitions, valid_partitions, model_fn, input_fn)
+    controller.grid_search()
 
 if __name__ == '__main__':
     main()
