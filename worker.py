@@ -26,9 +26,8 @@ logging.basicConfig(filename="worker.log",
 
 namespace = 'cerebro'
 
-CHECKPOINT_STORAGE_PATH = "./cerebro_checkpoint_storage/"
-CONFIG_STORAGE_PATH = "./cerebro_config_storage/"
-DATA_STORAGE_PATH = "./cerebro_data_storage/"
+CHECKPOINT_STORAGE_PATH = "/data/cerebro_checkpoint_storage"
+CONFIG_STORAGE_PATH = "/data/cerebro_config_storage"
 
 # saved as config file
 

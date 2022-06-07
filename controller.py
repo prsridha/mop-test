@@ -19,8 +19,8 @@ logging.basicConfig(filename="controller.log",
 
 namespace = 'cerebro'
 
-CHECKPOINT_STORAGE_PATH = "./cerebro_checkpoint_storage/"
-CONFIG_STORAGE_PATH = "./properties/"
+CHECKPOINT_STORAGE_PATH = "/data/cerebro_checkpoint_storage"
+CONFIG_STORAGE_PATH = "/data/cerebro_config_storage"
 
 class CerebroController:
     def __init__(self, worker_ips, num_epochs, param_grid, train_partitions, valid_partitions, model_fn, input_fn):
@@ -256,15 +256,16 @@ class CerebroController:
             mw_pair.append(lis)
 
         model_id_ckpt_mapping = {}
-        if not os.path.exists("./models/"):
+        ckpt_path_base = os.path.join(CHECKPOINT_STORAGE_PATH, "models")
+        if not os.path.exists(ckpt_path_base):
             print("MAKING MODELS DIR")
-            os.makedirs("./models/")
+            os.makedirs(ckpt_path_base)
         for mst_id, mst in current_msts:
-            ckpt_path =  "./models/" + str(mst_id)
+            ckpt_path =  os.path.join(ckpt_path_base, str(mst_id))
             if not os.path.exists(ckpt_path):
                 print("MAKING CHECKPOINT DIR")
                 os.makedirs(ckpt_path)
-            ckpt_path = ckpt_path + "/{}.model".format(mst_id)
+            ckpt_path = os.path.join(ckpt_path, "{}.model".format(mst_id))
             print("Checkpoint Path: " + ckpt_path + "\n")
             model_id_ckpt_mapping[mst_id] = ckpt_path
 
