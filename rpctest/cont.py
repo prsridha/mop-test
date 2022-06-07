@@ -12,7 +12,7 @@ class model:
 
 dill.settings["recurse"] = True
 
-def preload_data(workers, input_fn_string, train_partitions):
+def preload_data(workers, train_partitions, valid_data_path):
     for i, worker in workers.items():
         worker.initialize_worker()
 
@@ -20,7 +20,16 @@ def preload_data(workers, input_fn_string, train_partitions):
     for worker_id, worker in workers.items():
         exec_id = uuid()
         print(train_partitions[worker_id])
-        params = [input_fn_string, train_partitions[worker_id]]
+        params = [train_partitions[worker_id], "train"]
+        result = worker.load_worker_data(exec_id, params)
+        status = dill.loads(base64.b64decode(result.data))
+
+        exec_ids.append((exec_id, worker_id))
+        if status != "LAUNCHED":
+            raise Exception("Remote job launch failed. Reason: " + status)
+        exec_id = uuid()
+        print(valid_data_path)
+        params = [valid_data_path, "valid"]
         result = worker.load_worker_data(exec_id, params)
         status = dill.loads(base64.b64decode(result.data))
 
@@ -58,10 +67,10 @@ def get_runnable_model(w, models, model_on_worker, worker_on_model, mw_pair):
                 break
     return runnable_model
 
-def launch_job(worker, input_data_path, model_checkpoint_path, 
-               input_fn_string, model_fn_string, model_config):
+def launch_job(worker, train_data_path, valid_data_path, model_checkpoint_path, 
+                train_fn_string, valid_fn_string, model_config, is_last_worker):
     exec_id = ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(32))
-    params = [input_data_path, model_checkpoint_path, input_fn_string, model_fn_string, model_config]
+    params = [train_data_path, valid_data_path, model_checkpoint_path, train_fn_string, valid_fn_string, model_config, is_last_worker]
     result = worker.train_model_on_worker(exec_id, params)
     return exec_id
 
@@ -94,7 +103,7 @@ def uuid():
 
 #TODO: Validation dataset ETL: task parallel validation : what if validation data doesnt fit in memory of worker: bottleneck
 def schedule(worker_ips, train_partitions, valid_partitions, 
-            input_fn, model_fn, initial_msts, preload_data_to_mem):
+            train_fn, valid_fn, initial_msts, preload_data_to_mem):
     print(initial_msts)
     workers = {i: xc.ServerProxy(ip) for i, ip in enumerate(worker_ips)}
 
@@ -105,10 +114,12 @@ def schedule(worker_ips, train_partitions, valid_partitions,
     nworkers = len(workers)
     nmodels = len(current_msts)
     models_list = list(model_id_to_mst_mapping.keys())
+    model_config_num_map = {}
     print(models_list)
     model_on_worker = {}
     for m in models_list:
         model_on_worker[m] = -1
+        model_config_num_map[m] = 0
     worker_on_model = {}
     exec_id_on_worker = {}
     for w in range(nworkers):
@@ -126,12 +137,14 @@ def schedule(worker_ips, train_partitions, valid_partitions,
     model_to_build = set(models_list)
     
 
-
-    input_fn_string = base64.b64encode(dill.dumps(input_fn, byref=False)).decode("ascii")
-    model_fn_string = base64.b64encode(dill.dumps(model_fn, byref=False)).decode("ascii")
+    train_fn_string = base64.b64encode(dill.dumps(train_fn, byref=False)).decode("ascii")
+    valid_fn_string = base64.b64encode(dill.dumps(valid_fn, byref=False)).decode("ascii")
+    
+    # only one validation dataset
+    validation_data_path = valid_partitions[0]
 
     if preload_data_to_mem:
-        preload_data(workers, input_fn_string, train_partitions)
+        preload_data(workers, train_partitions, validation_data_path)
 
     model_id_ckpt_mapping = {}
     if not os.path.exists("./models/"):
@@ -151,12 +164,17 @@ def schedule(worker_ips, train_partitions, valid_partitions,
             if (worker_on_model[w] == -1):
                 m = get_runnable_model(w, models_list, model_on_worker, worker_on_model, mw_pair)
                 if m != -1:
+                    is_last_worker = False
+                    if model_config_num_map[m] == nworkers - 1:
+                        is_last_worker = True
                     exec_id = launch_job(workers[w],
                                         train_partitions[w],
-                                        model_id_ckpt_mapping[m], 
-                                        input_fn_string, 
-                                        model_fn_string,
-                                        model_id_to_mst_mapping[m]
+                                        validation_data_path,
+                                        model_id_ckpt_mapping[m],
+                                        train_fn_string,
+                                        valid_fn_string,
+                                        model_id_to_mst_mapping[m],
+                                        is_last_worker
                                         )
                     model_on_worker[m] = w
                     worker_on_model[w] = m
@@ -172,6 +190,7 @@ def schedule(worker_ips, train_partitions, valid_partitions,
                     # models[m].n = status["result"]
                     model_on_worker[m] = -1
                     worker_on_model[w] = -1
+                    model_config_num_map[m] += 1
                     mw_pair[m][w] = True
                     model_done = True
                     for i in range(nworkers):
@@ -191,8 +210,8 @@ def schedule(worker_ips, train_partitions, valid_partitions,
 # for the last epoch : along with training, do the validation too on the same worker : last sub epoch: longer time than other sub epochs
 
 def find_best_config(nepochs, worker_ips, train_partitions, valid_partitions, 
-            input_fn, model_fn, train_configs, preload_data_to_mem):
+            train_fn, valid_fn, train_configs, preload_data_to_mem):
         
         for i in range(nepochs):
             print("EPOCH: " + str(i+1))
-            schedule(worker_ips, train_partitions, valid_partitions, input_fn, model_fn, train_configs, preload_data_to_mem=True)
+            schedule(worker_ips, train_partitions, valid_partitions, train_fn, valid_fn, train_configs, preload_data_to_mem=True)

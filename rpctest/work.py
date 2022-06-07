@@ -6,7 +6,10 @@ import argparse
 import traceback
 import threading
 from time import sleep
+from torch.utils.data import DataLoader
 from xmlrpc.server import SimpleXMLRPCServer
+
+from data import get_dataset
 
 class model:
     def __init__(self, n):
@@ -24,31 +27,44 @@ def initialize_worker():
     gc.collect()
 
 
-def preload_data_helper(data_cache, input_fn_string, input_path):
-    input_fn = dill.loads(base64.b64decode(input_fn_string))
+def preload_data_helper(data_cache, input_path, mode):
     if input_path not in data_cache:
-        data_cache[input_path] = input_fn(input_path)
+        data_cache[input_path] = get_dataset(input_path, mode)
     return {"message": "Successfully pre-loaded the data..."}
 
-def train_model(data_cache, input_data_path, model_checkpoint_path, input_fn_string, model_fn_string, train_config):
-    input_fn = dill.loads(base64.b64decode(input_fn_string))
-    model_fn = dill.loads(base64.b64decode(model_fn_string))
-    print("training model:" + str(model_checkpoint_path) + " on data " + str(input_data_path))
-    if input_data_path in data_cache:
-        x_train, y_train = data_cache[input_data_path]
+def train_model(data_cache, train_data_path, valid_data_path, model_checkpoint_path, train_fn_string, valid_fn_string, train_config, is_last_worker):
+    train_fn = dill.loads(base64.b64decode(train_fn_string))
+    print("training model:" + str(model_checkpoint_path) + " on data " + str(train_data_path))
+    if train_data_path in data_cache:
+        train_dataset = data_cache[train_data_path]
+        train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
     
     else:
         print("data not pre loaded")
-        data = input_fn(input_data_path)
-        data_cache[input_data_path] = data
-        x_train, y_train = data
+        train_dataset = get_dataset(train_data_path, "train")
+        data_cache[train_data_path] = train_dataset
+        train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 
-    
-    model_fn(model_checkpoint_path, x_train, y_train, train_config)
+    train_fn(model_checkpoint_path, train_dataloader, train_config)
+    if is_last_worker:
+        validate_model(data_cache, valid_data_path, model_checkpoint_path, valid_fn_string)
+        print("validated model:" + str(model_checkpoint_path) + " on data " + str(valid_data_path))
     return {"message": "Successfully submitted model for training"}
 
-    
+def validate_model(data_cache, valid_data_path, model_checkpoint_path, valid_fn_string):
+    valid_fn = dill.loads(base64.b64decode(valid_fn_string))
 
+    if valid_data_path in data_cache:
+        valid_dataset = data_cache[valid_data_path]
+        valid_dataloader = DataLoader(valid_dataset, batch_size=128, shuffle=True)
+    
+    else:
+        print("data not pre loaded")
+        valid_dataset = get_dataset(valid_data_path, "valid")
+        data_cache[valid_data_path] = valid_dataset
+        valid_dataloader = DataLoader(valid_dataset, batch_size=128, shuffle=True)
+    
+    valid_fn(model_checkpoint_path, valid_dataloader)
 
 def bg_execute(exec_id, func, params):
     try:
