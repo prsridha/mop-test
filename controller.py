@@ -107,7 +107,6 @@ def get_model_on_worker():
 def set_model_on_worker(model_on_worker):
     path = os.path.join(CONFIG_STORAGE_PATH, "model-on-worker.pkl")
 
-    print(model_on_worker)
     with open(path, 'wb') as fp:
         pickle.dump(model_on_worker, fp)
 
@@ -349,11 +348,11 @@ def scheduler(workers, train_partitions, valid_partitions, model_fn, input_fn):
                                         model_id_to_mst_mapping[m]
                                         )
                     model_on_worker[m] = w
-                    model_on_worker[w] = m
+                    worker_on_model[w] = m
                     exec_id_on_worker[w] = exec_id
                     
                     set_model_on_worker(model_on_worker)
-                    set_worker_on_model(model_on_worker)
+                    set_worker_on_model(worker_on_model)
                     set_execid_on_worker(exec_id_on_worker)
 
                     print("Sent model {} to build on worker {} with config {}".format(str(m), str(w), str(model_id_to_mst_mapping[m])))
@@ -362,6 +361,7 @@ def scheduler(workers, train_partitions, valid_partitions, model_fn, input_fn):
                 m = worker_on_model[w]
                 exec_id = exec_id_on_worker[w]
                 completed, status = check_finished(workers[w], exec_id)
+
                 if completed:
                     print("Received Model {} built on worker {}".format(str(m), str(w)))
                     # models[m].n = status["result"]
@@ -383,9 +383,7 @@ def scheduler(workers, train_partitions, valid_partitions, model_fn, input_fn):
             sleep(1)
 
 
-def grid_search(train_partitions, valid_partitions, input_fn, model_fn):
-    init_epoch()
-    
+def grid_search(train_partitions, valid_partitions, input_fn, model_fn):    
     worker_ips = get_worker_ips()
     num_epochs = get_num_epochs()
     input_fn_string = base64.b64encode(dill.dumps(input_fn, byref=False)).decode("ascii")
@@ -394,4 +392,5 @@ def grid_search(train_partitions, valid_partitions, input_fn, model_fn):
 
     for i in range(num_epochs):
         print("EPOCH: " + str(i+1))
+        init_epoch()
         scheduler(workers, train_partitions, valid_partitions, model_fn, input_fn)
