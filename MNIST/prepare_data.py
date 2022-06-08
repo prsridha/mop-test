@@ -83,7 +83,7 @@ def model():
 
 tr_x, tr_y, tst_x, tst_y = load_data("dataset")
 
-save_train_shards(2, tr_x, tr_y)
+save_train_shards(3, tr_x, tr_y)
 
 # model()
 
